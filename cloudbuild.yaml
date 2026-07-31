@@ -1,0 +1,18 @@
+steps:
+- name: gcr.io/cloud-builders/docker
+  env:
+  - DOCKER_BUILDKIT=1
+  args:
+  - build
+  - -t
+  - ${_IMAGE}:${_TAG}
+  - .
+images:
+- ${_IMAGE}:${_TAG}
+substitutions:
+  _IMAGE: us-central1-docker.pkg.dev/supercomputer-testing/inference-perf/aiperf
+  _TAG: dev
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+timeout: 3600s
