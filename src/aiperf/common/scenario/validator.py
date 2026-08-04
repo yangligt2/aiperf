@@ -94,6 +94,7 @@ def apply_scenario(run: BenchmarkRun) -> ScenarioOutcome:
     _apply_inter_turn_delay_cap(run, spec, violations, applied)
     _apply_trace_idle_gap_cap(run, spec, violations, applied)
     _apply_system_idle_gap_cap(run, spec, violations, applied)
+    _apply_session_arrival_rate(run, spec, violations)
     _apply_random_seed(run, spec, applied)
 
     # Synthetic (CLI default when no --public-dataset/--input-file) under a
@@ -783,6 +784,38 @@ def _apply_system_idle_gap_cap(
             )
     if valid:
         applied.append("system_idle_gap_cap")
+
+
+def _apply_session_arrival_rate(
+    run: BenchmarkRun,
+    spec: ScenarioSpec,
+    violations: list[ScenarioViolation],
+) -> None:
+    """Reject open-loop arrivals when the scenario locks the closed loop.
+
+    The load model is part of the submission protocol, not a tuning knob: an
+    open-loop run offers a different (and unbounded) session population than
+    the ``--concurrency`` lane set the scenario fixes, so its results are not
+    comparable to a conforming run.
+    """
+    if not spec.forbid_session_arrival_rate:
+        return
+    for phase in run.cfg.get_profiling_phases():
+        session_arrival = getattr(phase, "session_arrival", None)
+        if session_arrival is None:
+            continue
+        violations.append(
+            ScenarioViolation(
+                flag="--session-arrival-rate",
+                current_value=session_arrival.rate,
+                required_value=None,
+                message=(
+                    f"scenario {spec.name!r} fixes the closed-loop "
+                    "concurrency-lane load model and forbids open-loop "
+                    "session arrivals"
+                ),
+            )
+        )
 
 
 def _apply_random_seed(

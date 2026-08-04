@@ -163,6 +163,19 @@ Local `weka_trace` under the scenario always needs `--unsafe-override`
 
 For the full mechanics (trajectory selection, recycle queue, warmup barrier) and the locked submission rules on top, see [InferenceX AgentX MVP](agentx-mvp.md).
 
+#### Open-Loop Session Arrivals
+
+`agentic_replay` is closed loop by default: `--concurrency` trajectory lanes are
+held occupied for the whole phase and a drained lane immediately recycles.
+`--session-arrival-rate <lambda>` switches the profiling phase to an open loop
+instead: session starts come from a Poisson (or gamma / constant) arrival
+process, so the in-system session count follows from the rate and the mean
+session residence time rather than being pinned to `--concurrency`. Only
+session starts are metered: main-turn continuations, subagent fan-out groups
+and subagent inner turns keep their recorded causal timing. This is the
+configuration for a load-vs-latency curve over a trace corpus. See
+[Open-Loop Session Arrivals](../benchmark-modes/open-loop-session-arrivals.md).
+
 ### Cache-Bust Markers
 
 AIPerf can inject a unique per-play marker according to the `--cache-bust`
@@ -276,6 +289,7 @@ Log lines to look for: per trace `detected N agents (...)`, the corpus summary `
 ## Related Tutorials
 
 - [InferenceX AgentX MVP](agentx-mvp.md) — the SemiAnalysis multi-turn agentic-coding benchmark scenario built on this corpus.
+- [Open-Loop Session Arrivals](../benchmark-modes/open-loop-session-arrivals.md) - Poisson session admission on top of `agentic_replay`.
 - [DAG Benchmarking (Sub-Agents)](../benchmark-modes/dag.md) — the gating mechanism subagent support relies on.
 - [Fixed Schedule](fixed-schedule.md) — precise timestamp-based execution.
 - [Trace Benchmarking](../benchmark-modes/trace-replay.md) — general deterministic workload replay.

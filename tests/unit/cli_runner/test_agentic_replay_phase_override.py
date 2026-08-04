@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
 from aiperf.config.flags import CLIConfig
 from aiperf.config.flags.resolver import resolve_config
+from aiperf.plugin.enums import ArrivalPattern
 
 TEMPLATES_DIR = (
     pathlib.Path(__file__).resolve().parents[3]
@@ -130,3 +133,43 @@ def test_agentic_warmup_does_not_clobber_warmup_phase(
     for phase in cfg.benchmark.phases:
         if phase.name == "warmup":
             assert getattr(phase, "agentic_cache_warmup_duration", None) is None
+
+
+def test_session_arrival_flags_fold_into_the_nested_phase_section(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The three flat ``--session-arrival-*`` flags build one phase section."""
+    cfg = resolve_config(
+        _cli(
+            session_arrival_rate=0.4,
+            session_arrival_pattern="gamma",
+            session_arrival_smoothness=0.5,
+        ),
+        _agentic_yaml(tmp_path),
+    )
+    section = _profiling_phase(cfg).session_arrival
+    assert section.rate == 0.4
+    assert section.pattern == ArrivalPattern.GAMMA
+    assert section.smoothness == 0.5
+
+
+def test_session_arrival_rate_alone_defaults_to_poisson(
+    tmp_path: pathlib.Path,
+) -> None:
+    cfg = resolve_config(_cli(session_arrival_rate=0.4), _agentic_yaml(tmp_path))
+    section = _profiling_phase(cfg).session_arrival
+    assert section.pattern == ArrivalPattern.POISSON
+    assert section.smoothness is None
+
+
+def test_session_arrival_pattern_without_rate_is_rejected(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Pattern without a rate reads as an open loop that is in fact closed."""
+    with pytest.raises(ValueError, match="requires --session-arrival-rate"):
+        resolve_config(_cli(session_arrival_pattern="gamma"), _agentic_yaml(tmp_path))
+
+
+def test_no_session_arrival_flags_leaves_the_section_unset() -> None:
+    cfg = resolve_config(CLIConfig(), TEMPLATES_DIR / "minimal.yaml")
+    assert _profiling_phase(cfg).session_arrival is None

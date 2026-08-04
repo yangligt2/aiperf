@@ -13,6 +13,7 @@ from aiperf.common.models.base_models import AIPerfBaseModel
 from aiperf.common.types import PhaseKind
 from aiperf.config.dataset.defaults import InputDefaults
 from aiperf.config.rate_series import RateSeriesConfig
+from aiperf.config.session_arrival import SessionArrivalConfig
 from aiperf.config.sweep.adaptive import SLAFilter
 from aiperf.plugin.enums import (
     ArrivalPattern,
@@ -145,6 +146,13 @@ class TimingConfig(AIPerfBaseModel):
         "target. An active cache-bust marker keeps repeated-trace traffic "
         "distinct, so it satisfies the dataset-wrap opt-in on its own.",
     )
+    session_arrival: SessionArrivalConfig | None = Field(
+        default=None,
+        description="AGENTIC_REPLAY open-loop session-arrival process, read off "
+        "the profiling phase. When set, no trajectory lanes and no t* snapshot "
+        "warmup are built; sessions are admitted by the arrival process. None "
+        "keeps the closed-loop lane/recycle model.",
+    )
 
     @classmethod
     def from_run(cls, run: BenchmarkRun) -> TimingConfig:
@@ -163,8 +171,18 @@ class TimingConfig(AIPerfBaseModel):
         profiling_default_cancellation = _default_cancellation_config(cfg.phases)
         warmup_default_cancellation = RequestCancellationConfig()
 
+        # Open-loop arrivals build no t* snapshot, so there is nothing for the
+        # synthesized snapshot warmup to prime. Combined with the agentic skip
+        # of user-declared warmup phases below, an arrival-driven run has no
+        # warmup at all: it starts empty and reaches steady state after roughly
+        # one mean session residence time.
+        arrival_driven = (
+            agentic
+            and getattr(profiling_phases[0], "session_arrival", None) is not None
+        )
+
         configs: list[CreditPhaseConfig] = []
-        if agentic:
+        if agentic and not arrival_driven:
             agentic_warmup = _build_agentic_warmup_config(profiling_phases[0])
             if agentic_warmup is not None:
                 configs.append(agentic_warmup)
@@ -217,6 +235,7 @@ class TimingConfig(AIPerfBaseModel):
             trajectory_start_max_ratio=trajectory_max,
             allow_dataset_wrap=allow_dataset_wrap,
             cache_bust_enabled=cache_bust_enabled,
+            session_arrival=getattr(first_profiling, "session_arrival", None),
         )
 
 
@@ -301,6 +320,15 @@ class CreditPhaseConfig(AIPerfBaseModel):
         "Only used when arrival_pattern is GAMMA. Controls the shape of the distribution: "
         "1.0 = Poisson-like (exponential), <1.0 = bursty, >1.0 = smooth/regular. "
         "If None, defaults to 1.0 when using GAMMA arrival pattern.",
+    )
+    session_arrival: SessionArrivalConfig | None = Field(
+        default=None,
+        description="AGENTIC_REPLAY only: exogenous session-arrival process. "
+        "When set, the profiling phase runs OPEN loop: sessions are admitted by "
+        "this arrival process instead of by recycling a fixed set of "
+        "concurrency lanes. Meters session STARTS only; continuations, subagent "
+        "fan-out and inner turns keep their recorded causal timing. None keeps "
+        "the closed-loop lane/recycle model.",
     )
     grace_period_sec: float | None = Field(
         default=None,
@@ -679,6 +707,7 @@ def _build_profiling_config(
         request_rate=_phase_request_rate(phase),
         arrival_pattern=_phase_arrival_pattern(phase),
         arrival_smoothness=getattr(phase, "smoothness", None),
+        session_arrival=getattr(phase, "session_arrival", None),
         seamless=phase.seamless,
         grace_period_sec=phase.grace_period,
         num_users=getattr(phase, "users", None),

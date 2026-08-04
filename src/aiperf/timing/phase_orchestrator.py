@@ -221,11 +221,16 @@ class PhaseOrchestrator(AIPerfLifecycleMixin):
         cache_bust_target = (
             run.cfg.get_cache_bust_target() if run is not None else CacheBustTarget.NONE
         )
+        # Open-loop arrivals size the in-system session count from the arrival
+        # rate, so concurrency is optional there (an admission ceiling when set,
+        # uncapped when not) rather than the mandatory lane count.
+        arrival_driven = is_agentic_replay and config.session_arrival is not None
         if is_agentic_replay:
-            if config.concurrency is None:
+            if config.concurrency is None and not arrival_driven:
                 raise ValueError(
                     "AGENTIC_REPLAY timing mode requires concurrency to be set on "
-                    "TimingConfig (sourced from the profiling phase concurrency)."
+                    "TimingConfig (sourced from the profiling phase concurrency), "
+                    "unless --session-arrival-rate selects open-loop arrivals."
                 )
             profiling = next(
                 (
@@ -253,6 +258,7 @@ class PhaseOrchestrator(AIPerfLifecycleMixin):
                 expected_duration_sec=(
                     profiling.expected_duration_sec if profiling is not None else None
                 ),
+                arrival_driven=arrival_driven,
             )
         else:
             self._conversation_source = ConversationSource(

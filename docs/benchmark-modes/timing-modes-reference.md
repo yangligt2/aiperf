@@ -69,6 +69,19 @@ When multiple options are specified, AIPerf uses this priority:
 - `gamma` - Tunable smoothness via `--arrival-smoothness`
 - `concurrency_burst` - As fast as possible within concurrency limits (auto-set when no rate specified)
 
+### Session Arrival Options (`agentic_replay` only)
+
+| Option | Notes |
+|--------|-------|
+| `--session-arrival-rate` | Sessions started per second. Switches `agentic_replay` from its closed loop to an open loop. Rejected under any other timing mode. |
+| `--session-arrival-smoothness` | Only with `--session-arrival-pattern gamma` |
+| `--session-arrival-pattern` | `constant`, `poisson` (default), `gamma`. `concurrency_burst` is rejected here. |
+
+These meter session **starts**, not requests. `--request-rate` meters requests
+and would thin the recorded intra-session fan-out along with session starts,
+which is why `agentic_replay` uses a separate arrival clock. See
+[Open-Loop Session Arrivals](open-loop-session-arrivals.md).
+
 ### Concurrency Options
 
 | Option | `--request-rate` | `--fixed-schedule` | `--user-centric-rate` | Notes |

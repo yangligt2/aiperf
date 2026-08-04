@@ -58,16 +58,26 @@ _AGENTIC_REPLAY_ROUTES: tuple[str, ...] = (
 )
 
 
+# Flat CLI flags folded into the nested ``session_arrival`` phase section by
+# ``_apply_session_arrival``. Rate first: the others require it.
+_SESSION_ARRIVAL_ROUTES: tuple[str, ...] = (
+    "session_arrival_rate",
+    "session_arrival_pattern",
+    "session_arrival_smoothness",
+)
+
+
 def _apply_agentic_replay_fields(phase: dict[str, Any], cli: CLIConfig) -> None:
     """Copy explicitly-set AGENTIC_REPLAY phase fields onto a phase dict.
 
-    These four fields live on ``BasePhaseConfig`` (shared by profiling and
-    warmup), so the same helper feeds both converters.
+    These fields live on ``BasePhaseConfig`` (shared by profiling and warmup),
+    so the same helper feeds both converters.
     """
     fields_set = cli.model_fields_set
     for attr in _AGENTIC_REPLAY_ROUTES:
         if attr in fields_set:
             phase[attr] = getattr(cli, attr)
+    _apply_session_arrival(phase, cli)
     # v1 parity: under a --scenario, --warmup-grace-period fed the agentic
     # warmup barrier grace (there was no dedicated flag). Route it onto
     # agentic_warmup_grace_period when the dedicated flag is unset; an
@@ -78,6 +88,29 @@ def _apply_agentic_replay_fields(phase: dict[str, Any], cli: CLIConfig) -> None:
         and cli.warmup_grace_period is not None
     ):
         phase["agentic_warmup_grace_period"] = cli.warmup_grace_period
+
+
+def _apply_session_arrival(phase: dict[str, Any], cli: CLIConfig) -> None:
+    """Fold the flat ``--session-arrival-*`` flags into the nested section.
+
+    The rate is what turns the open loop on, so pattern/smoothness without it
+    are rejected rather than silently dropped: they would otherwise read as an
+    open-loop run that is in fact still closed-loop.
+    """
+    fields_set = cli.model_fields_set
+    if "session_arrival_rate" not in fields_set:
+        for attr in _SESSION_ARRIVAL_ROUTES[1:]:
+            if attr in fields_set:
+                raise ValueError(
+                    f"--{attr.replace('_', '-')} requires --session-arrival-rate."
+                )
+        return
+    section: dict[str, Any] = {"rate": cli.session_arrival_rate}
+    if "session_arrival_pattern" in fields_set:
+        section["pattern"] = cli.session_arrival_pattern
+    if "session_arrival_smoothness" in fields_set:
+        section["smoothness"] = cli.session_arrival_smoothness
+    phase["session_arrival"] = section
 
 
 def _profiling_phase_type(cli: CLIConfig) -> Any:

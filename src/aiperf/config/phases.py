@@ -31,8 +31,14 @@ from aiperf.config.loader.duration import (
 )
 from aiperf.config.ramp import RampConfig, RampSpec, _normalize_ramp
 from aiperf.config.rate_series import RateSeriesConfig
+from aiperf.config.session_arrival import SessionArrivalConfig
 from aiperf.config.sweep.adaptive import SLAFilter
-from aiperf.plugin.enums import PhaseType, PhaseTypeStr, RampType, TimingMode
+from aiperf.plugin.enums import (
+    PhaseType,
+    PhaseTypeStr,
+    RampType,
+    TimingMode,
+)
 
 __all__ = [
     "BasePhaseConfig",
@@ -347,6 +353,18 @@ class BasePhaseConfig(AdaptiveScalePhaseMixin, BaseConfig):
             "request arrives within this limit. Per-trace timing, timer order, "
             "and relative spacing are otherwise preserved. None disables the "
             "global idle cap.",
+        ),
+    ]
+
+    session_arrival: Annotated[
+        SessionArrivalConfig | None,
+        Field(
+            default=None,
+            description="AGENTIC_REPLAY only: open-loop session-arrival process. "
+            "Switches the profiling phase from the default CLOSED loop (a fixed "
+            "set of --concurrency trajectory lanes, each recycling into a fresh "
+            "trace the moment its tree drains) to an OPEN loop driven by an "
+            "exogenous arrival process. None keeps the closed loop.",
         ),
     ]
 

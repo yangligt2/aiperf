@@ -438,11 +438,14 @@ def _apply_phase_loadgen_overrides(merged: dict[str, Any], cli: CLIConfig) -> No
     """
     from aiperf.config.flags._converter_profiling import (
         _AGENTIC_REPLAY_ROUTES,
+        _SESSION_ARRIVAL_ROUTES,
         _apply_agentic_replay_fields,
     )
 
     loadgen_set = cli.model_fields_set & LOADGEN_FIELDS
-    agentic_set = cli.model_fields_set.intersection(_AGENTIC_REPLAY_ROUTES)
+    agentic_set = cli.model_fields_set.intersection(
+        _AGENTIC_REPLAY_ROUTES + _SESSION_ARRIVAL_ROUTES
+    )
     if not loadgen_set and not agentic_set:
         return
 

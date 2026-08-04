@@ -203,6 +203,8 @@ navigation:
     path: tutorials/baseten-trace.md
   - page: Conversation DAG Benchmarks
     path: benchmark-modes/dag.md
+  - page: Open-Loop Session Arrivals
+    path: benchmark-modes/open-loop-session-arrivals.md
   - page: "SemiAnalysis AgentX: How the Benchmark Works (FAQ)"
     path: benchmark-modes/semianalysis-agentx-faq.md
 

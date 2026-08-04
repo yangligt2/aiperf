@@ -616,6 +616,62 @@ class BenchmarkConfig(BaseConfig, BenchmarkHelpersMixin):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_session_arrival_rate(self) -> Self:
+        """Restrict open-loop session arrivals to the agentic_replay timing mode.
+
+        ``--session-arrival-rate`` is read by ``AgenticReplayStrategy`` alone;
+        under any other timing mode it is silently dropped, so an unguarded flag
+        would be an invisible no-op. Resolution mirrors
+        :meth:`validate_agentic_cache_warmup`: a ``--scenario`` declares the
+        timing mode before ``apply_scenario`` stamps it onto the phases, so read
+        it off the :class:`ScenarioSpec`; otherwise the phases are final and the
+        timing builder's own resolution applies.
+        """
+        from aiperf.plugin.enums import ArrivalPattern, TimingMode
+        from aiperf.timing.config import _is_agentic_replay
+
+        profiling_phases = self.get_profiling_phases()
+        arrival_phases = [
+            phase
+            for phase in profiling_phases
+            if getattr(phase, "session_arrival", None) is not None
+        ]
+        if not arrival_phases:
+            return self
+
+        # CONCURRENCY_BURST yields a zero inter-arrival time, so it would admit
+        # sessions as fast as the loop can spin, ignoring the rate entirely. An
+        # uncapped open loop under that pattern spawns without bound.
+        for phase in arrival_phases:
+            if phase.session_arrival.pattern == ArrivalPattern.CONCURRENCY_BURST:
+                raise ValueError(
+                    "--session-arrival-pattern concurrency_burst is incompatible "
+                    "with --session-arrival-rate: it produces zero inter-arrival "
+                    "time and ignores the rate. Use poisson, gamma or constant."
+                )
+
+        if self.scenario is not None:
+            from aiperf.common.scenario.registry import get_scenario
+
+            scenario_timing_mode = get_scenario(self.scenario).timing_mode
+            if scenario_timing_mode != TimingMode.AGENTIC_REPLAY:
+                raise ValueError(
+                    "--session-arrival-rate requires the agentic_replay timing "
+                    f"mode; scenario {self.scenario!r} locks "
+                    f"timing_mode={scenario_timing_mode}."
+                )
+            return self
+
+        if not _is_agentic_replay(profiling_phases):
+            raise ValueError(
+                "--session-arrival-rate requires the agentic_replay timing mode; "
+                "the profiling phase(s) are not agentic_replay. Set "
+                "timing_mode: agentic_replay on the profiling phase (or select a "
+                "scenario that locks it)."
+            )
+        return self
+
 
 class AIPerfConfig(BaseConfig):
     """AIPerf YAML envelope.

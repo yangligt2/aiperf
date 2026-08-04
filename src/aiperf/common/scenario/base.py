@@ -130,6 +130,13 @@ class ScenarioSpec(AIPerfBaseModel):
             "each trace's original inter-turn timing."
         ),
     )
+    forbid_session_arrival_rate: bool = Field(
+        default=False,
+        description=(
+            "Reject session_arrival_rate so the scenario keeps the closed-loop "
+            "concurrency-lane load model instead of open-loop arrivals."
+        ),
+    )
     require_cache_bust: CacheBustTarget | None = Field(
         default=None,
         description=(

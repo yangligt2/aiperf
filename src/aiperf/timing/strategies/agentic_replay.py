@@ -51,6 +51,16 @@ its lane recycles: a fresh session (starting at turn 0) is spawned from the
 next root drawn from the shared dataset sampler
 (``TrajectorySource.next_recycle_conversation_id``), honoring the configured
 ``sampling_strategy`` -- there is no strategy-side FIFO recycle queue.
+
+OPEN-LOOP PROFILING (``--session-arrival-rate``): the lane/recycle model above
+is replaced by an exogenous session-arrival process (see
+:mod:`aiperf.timing.session_arrival`). There are no trajectories and no t*
+snapshot warmup: every arrival admits a fresh trace replay from turn 0, and a
+drained tree recycles nothing. In-system session count becomes a consequence of
+the arrival rate and per-session residence time rather than a configured
+constant. Everything downstream of admission -- continuations at
+``completion(turn k) + recorded delay``, subagent fan-out, inner turns -- is
+unchanged and is never metered by the arrival rate.
 """
 
 from __future__ import annotations
@@ -70,9 +80,11 @@ from aiperf.common.environment import Environment
 from aiperf.common.mixins import AIPerfLoggerMixin
 from aiperf.common.scenario.base import TrajectoryWarmupFailedError
 from aiperf.common.scenario.context_overflow import is_context_overflow_response
+from aiperf.config.session_arrival import SessionArrivalConfig
 from aiperf.credit.structs import TurnToSend
 from aiperf.timing.conversation_source import SampledSession
 from aiperf.timing.replay_dependencies import ReplayResumeBoundary
+from aiperf.timing.session_arrival import SessionArrivalDriver
 from aiperf.timing.trajectory_source import (
     ConversationState,
     Trajectory,
@@ -171,6 +183,25 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
             t.conversation_id for t in conversation_source.trajectories
         )
         self._failed_warmup_traces: list[str] = []
+        # Open-loop session arrivals (``--session-arrival-rate``). Present only
+        # on the PROFILING phase: an arrival-driven run synthesizes no t*
+        # snapshot warmup (there is no snapshot to prime), so WARMUP never
+        # constructs a driver even if the rate is set.
+        self._arrival_driver: SessionArrivalDriver | None = None
+        session_arrival = getattr(config, "session_arrival", None)
+        if (
+            isinstance(session_arrival, SessionArrivalConfig)
+            and config.phase == CreditPhase.PROFILING
+        ):
+            self._arrival_driver = SessionArrivalDriver(
+                strategy=self,
+                credit_issuer=credit_issuer,
+                stop_checker=stop_checker,
+                lifecycle=lifecycle,
+                rate=session_arrival.rate,
+                pattern=session_arrival.pattern,
+                smoothness=session_arrival.smoothness,
+            )
         cache_warmup_duration = getattr(
             config, "agentic_cache_warmup_duration_sec", None
         )
@@ -263,6 +294,15 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
         # shared-trace lanes. agentx-mvp auto-locks cache_bust=first_turn_prefix
         # so this never fires there; ad-hoc agentic-replay with cache_bust
         # explicitly off gets a loud heads-up.
+        if self._arrival_driven and self._cache_bust_target == CacheBustTarget.NONE:
+            self.warning(
+                "Open-loop session arrivals sample traces WITH REPLACEMENT, so "
+                "the same trace is replayed many times over a run with "
+                "cache_bust.target=NONE: every replay after the first reuses "
+                "the prior one's prefix and inflates the measured cache hit "
+                "rate. Set cache_bust.target=first_turn_prefix so each replay "
+                "instance gets its own cache namespace."
+            )
         wrap_fill_active = any(count > 1 for count in self._lanes_per_trace.values())
         if wrap_fill_active and self._cache_bust_target == CacheBustTarget.NONE:
             self.warning(
@@ -274,6 +314,15 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
                 len(self._lanes_per_trace),
                 sum(self._lanes_per_trace.values()),
             )
+
+    @property
+    def _arrival_driven(self) -> bool:
+        """True when this phase admits sessions from an exogenous arrival process.
+
+        Mutually exclusive with the lane/recycle model: an arrival-driven phase
+        has no trajectories to resume and never recycles a drained tree.
+        """
+        return self._arrival_driver is not None
 
     @property
     def _has_tree_registry(self) -> bool:
@@ -366,6 +415,11 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
         return finishes and is cancelled cleanly at phase teardown. The slot was
         already released by the registry, so the recycled root's acquire keeps
         occupancy at exactly the configured concurrency.
+
+        Under open-loop arrivals there is nothing to recycle into: the freed
+        slot stays free until the next exogenous arrival claims it. The
+        bookkeeping teardown below still runs so a long run does not accumulate
+        one map entry per completed session.
         """
         self.credit_issuer.replay_gate.close_root(root_corr)
         if self.branch_orchestrator is not None:
@@ -373,6 +427,8 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
         lane = self._correlation_to_lane.pop(root_corr, None)
         self._session_marker.pop(root_corr, None)
         self._root_to_lane.pop(root_corr, None)
+        if self._arrival_driven:
+            return
         if lane is None:
             self.warning(
                 lambda: (
@@ -398,6 +454,12 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
         """
         if self._has_tree_registry:
             self._session_tree_registry.set_drain_callback(self._on_tree_drained)
+        if self._arrival_driven:
+            # No trajectories, so no completed prefix to seed. The gate is
+            # still activated: subagent fan-out and gated joins within an
+            # admitted session go through the same replay barrier.
+            self.credit_issuer.replay_gate.activate()
+            return
         if self.config.phase == CreditPhase.PROFILING:
             for trajectory in self.conversation_source.trajectories:
                 self._seed_trajectory_replay_prefix(trajectory)
@@ -426,6 +488,8 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
         """Dispatch initial credits for the phase."""
         if self.config.phase == CreditPhase.WARMUP:
             await self._execute_warmup()
+        elif self._arrival_driver is not None:
+            await self._arrival_driver.run()
         else:
             await self._execute_profiling()
         self.enforce_system_idle_cap()
@@ -807,6 +871,8 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
 
     async def finalize_phase(self) -> None:
         """Persist the drained accelerated-warmup DAG for profiling."""
+        if self._arrival_driver is not None:
+            self.info(self._arrival_driver.stats_summary)
         if self._system_idle_gap_cap_seconds is not None:
             self.scheduler.set_drain_observer(None)
             self.info(
@@ -1160,6 +1226,49 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
             )
         return rebuilt
 
+    async def admit_session_arrival(self, arrival_index: int) -> bool | None:
+        """Admit one exogenous session arrival: a fresh trace replay at turn 0.
+
+        Called by :class:`~aiperf.timing.session_arrival.SessionArrivalDriver`
+        once per arrival instant. The trace is drawn from the shared dataset
+        sampler, so selection honours the dataset's ``sampling_strategy``
+        (``random`` gives sampling with replacement, which is the open-loop
+        default).
+
+        ``arrival_index`` is a monotonically increasing session ordinal that
+        stands in for the closed-loop lane index. It feeds the cache-bust
+        digest, so every replay instance of the same trace gets a distinct
+        marker and a distinct ``X-Session-ID`` salt: a second replay of a trace
+        cannot inflate the measured prefix-cache hit rate off the first.
+
+        Returns:
+            True when the turn-0 credit reached the wire, False when issuance
+            was refused by a stop condition (the driver must stop generating),
+            None when the sampler yielded no spawnable root (skip this
+            arrival).
+        """
+        trace_id = self.conversation_source.next_recycle_conversation_id()
+        if trace_id is None:
+            return None
+
+        session = self._build_session_for_trace(trace_id)
+        if session is None or not session.metadata.turns:
+            return None
+
+        root_corr = session.effective_root_correlation_id
+        self._correlation_to_lane[session.x_correlation_id] = arrival_index
+        self._root_to_lane[root_corr] = arrival_index
+        self._mint_marker_for_session(root_corr, trace_id, arrival_index)
+
+        turn = self._build_turn_for_session(session, 0)
+        # ``issue_credit`` returns False both for "refused" and for "issued,
+        # and that was the phase's final credit", so the bookkeeping above is
+        # never rolled back on False: the session may be live, and dropping its
+        # marker would make its subagents re-mint a different one and split the
+        # tree's prefix-cache domain. Refusals only occur at phase end, so the
+        # few orphaned map entries are bounded.
+        return await self.credit_issuer.issue_credit(turn)
+
     async def _execute_profiling(self) -> None:
         """Resume each trajectory at ``k_i + 1`` to seed the steady state.
 
@@ -1439,7 +1548,12 @@ class AgenticReplayStrategy(AIPerfLoggerMixin):
         x_correlation_id and a freshly minted cache-bust marker (nothing
         warmed). No-op during cooldown -- in-flight returns must not start new
         sessions -- or when the sampler yields no spawnable root.
+
+        Never fires under open-loop arrivals: admission there is owned solely by
+        the arrival process, so a completion must not create a session.
         """
+        if self._arrival_driven:
+            return
         if not self.stop_checker.can_start_new_session():
             return
 

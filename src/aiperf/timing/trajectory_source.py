@@ -227,6 +227,12 @@ class TrajectorySource(ConversationSource):
 
     Constructed once at TimingManager level (not per-phase) so trajectory
     state survives the WARMUP -> PROFILING boundary.
+
+    ``arrival_driven=True`` switches off trajectory construction entirely
+    (``--session-arrival-rate``): sessions are drawn one at a time at arrival
+    instants instead of being pinned to a fixed lane set. The source is still
+    required in that mode for the shared metadata lookup, root sampler and
+    cache-bust ledger.
     """
 
     def __init__(
@@ -234,7 +240,7 @@ class TrajectorySource(ConversationSource):
         *,
         dataset_metadata: DatasetMetadata,
         dataset_sampler: DatasetSamplingStrategyProtocol,
-        concurrency: int,
+        concurrency: int | None,
         random_seed: int,
         start_min_ratio: float = 0.25,
         start_max_ratio: float = 0.75,
@@ -243,6 +249,7 @@ class TrajectorySource(ConversationSource):
         total_expected_requests: int | None = None,
         expected_duration_sec: float | None = None,
         cache_bust_enabled: bool = False,
+        arrival_driven: bool = False,
     ) -> None:
         super().__init__(
             dataset_metadata=dataset_metadata, dataset_sampler=dataset_sampler
@@ -267,15 +274,21 @@ class TrajectorySource(ConversationSource):
             for conv in dataset_metadata.conversations
             if getattr(conv, "is_root", True) is not False
         )
-        validate_dataset_wrap_policy(
-            distinct=pool_size,
-            concurrency=concurrency,
-            allow_dataset_wrap=allow_dataset_wrap,
-            expected_num_sessions=expected_num_sessions,
-            total_expected_requests=total_expected_requests,
-            expected_duration_sec=expected_duration_sec,
-            cache_bust_enabled=cache_bust_enabled,
-        )
+        # Open-loop arrivals sample the corpus with replacement by design, so
+        # the wrap opt-in (which guards against unintended lane over-
+        # subscription) does not apply. The reuse hazard it protects against is
+        # instead covered by the cache-bust warning the strategy emits at
+        # PROFILING start.
+        if not arrival_driven:
+            validate_dataset_wrap_policy(
+                distinct=pool_size,
+                concurrency=concurrency if concurrency is not None else 0,
+                allow_dataset_wrap=allow_dataset_wrap,
+                expected_num_sessions=expected_num_sessions,
+                total_expected_requests=total_expected_requests,
+                expected_duration_sec=expected_duration_sec,
+                cache_bust_enabled=cache_bust_enabled,
+            )
         self._concurrency = concurrency
         self._pool_size = pool_size
         self._allow_dataset_wrap = allow_dataset_wrap
@@ -290,8 +303,23 @@ class TrajectorySource(ConversationSource):
         # Wrapping requires ``allow_dataset_wrap``, an active cache-bust target,
         # or a one-pass / in-corpus session budget; see
         # ``validate_dataset_wrap_policy``.
-        self._target_size = concurrency
-        self.trajectories: list[Trajectory] = self._build_trajectories()
+        # Open loop builds no trajectories: there is no fixed lane set and no
+        # t* snapshot to resume. Every session is admitted by the arrival
+        # process as a fresh turn-0 replay, drawn at admission time through
+        # ``next_recycle_conversation_id``.
+        self._target_size = 0 if arrival_driven else (concurrency or 0)
+        self.trajectories: list[Trajectory] = (
+            [] if arrival_driven else self._build_trajectories()
+        )
+
+        if arrival_driven:
+            _logger.info(
+                "TrajectorySource in open-loop mode: %d distinct roots available "
+                "for arrival-time sampling; no trajectory lanes or t* snapshots "
+                "are built.",
+                pool_size,
+            )
+            return
 
         if not self.trajectories:
             raise EmptyTracePoolError(
@@ -309,7 +337,7 @@ class TrajectorySource(ConversationSource):
                 distinct,
                 len(self.trajectories) / distinct,
             )
-        if len(self.trajectories) < concurrency:
+        if concurrency is not None and len(self.trajectories) < concurrency:
             _logger.warning(
                 "Built %d trajectories for concurrency=%d: the sampler could not "
                 "supply enough spawnable traces (pool too small / too many "
